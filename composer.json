@@ -1,0 +1,41 @@
+{
+    "name": "ebrook/filament-keycloak-web-guard",
+    "description": "Filament-ready Keycloak Web Guard (based on vizir/laravel-keycloak-web-guard)",
+    "homepage": "https://github.com/ebrook/filament-keycloak-web-guard",
+    "license": "MIT",
+    "keywords": [
+        "laravel",
+        "keycloak",
+        "jwt",
+        "authentication"
+    ],
+    "authors": [
+        {
+            "name": "Mário Valney",
+            "email": "mariovalney@gmail.com"
+        },
+        {
+            "name": "Ebrook",
+            "email": "antony@ebrook.com.tw"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require": {
+        "guzzlehttp/guzzle": "^6.5|^7.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ebrook\\KeycloakWebGuard\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Ebrook\\KeycloakWebGuard\\KeycloakWebGuardServiceProvider"
+            ],
+            "aliases": {
+                "KeycloakWeb": "Ebrook\\KeycloakWebGuard\\Facades\\KeycloakWeb"
+            }
+        }
+    }
+}
