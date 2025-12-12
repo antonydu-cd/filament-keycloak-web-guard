@@ -375,8 +375,18 @@ class KeycloakService
      */
     public function saveToken($credentials)
     {
+        // Ensure session is started before saving
+        if (!session()->isStarted()) {
+            session()->start();
+        }
+        
         session()->put(self::KEYCLOAK_SESSION, $credentials);
         session()->save();
+        
+        // Commit session to ensure it's written to storage
+        if (method_exists(session()->driver(), 'commit')) {
+            session()->driver()->commit();
+        }
     }
 
     /**
@@ -397,7 +407,24 @@ class KeycloakService
      */
     public function validateState($state)
     {
+        // Ensure session is started before accessing it
+        // This is critical for multi-tenant applications
+        if (!session()->isStarted()) {
+            session()->start();
+        }
+        
         $challenge = session()->get(self::KEYCLOAK_SESSION_STATE);
+        
+        // Log for debugging
+        Log::debug('Keycloak validateState', [
+            'request_state' => $state,
+            'session_state' => $challenge,
+            'session_id' => session()->getId(),
+            'states_match' => $challenge === $state,
+            'state_empty' => empty($state),
+            'challenge_empty' => empty($challenge),
+        ]);
+        
         return (! empty($state) && ! empty($challenge) && $challenge === $state);
     }
 
@@ -408,8 +435,21 @@ class KeycloakService
      */
     public function saveState()
     {
+        // Ensure session is started before saving state
+        // This is critical for multi-tenant applications
+        if (!session()->isStarted()) {
+            session()->start();
+        }
+        
         session()->put(self::KEYCLOAK_SESSION_STATE, $this->state);
         session()->save();
+        
+        // Log for debugging
+        Log::debug('Keycloak state saved', [
+            'state' => $this->state,
+            'session_id' => session()->getId(),
+            'session_state_after_save' => session()->get(self::KEYCLOAK_SESSION_STATE),
+        ]);
     }
 
     /**

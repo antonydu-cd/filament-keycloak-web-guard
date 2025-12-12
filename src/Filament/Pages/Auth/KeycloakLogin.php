@@ -18,6 +18,14 @@ class KeycloakLogin extends SimplePage
             return redirect()->intended(filament()->getUrl());
         }
 
+        // Store panel context in session so callback knows which guard to use
+        $panel = filament()->getCurrentPanel();
+        if ($panel) {
+            $panelId = $panel->getId();
+            session()->put('keycloak_panel_context', $panelId);
+            session()->save();
+        }
+
         $url = KeycloakWeb::getLoginUrl();
         KeycloakWeb::saveState();
 
