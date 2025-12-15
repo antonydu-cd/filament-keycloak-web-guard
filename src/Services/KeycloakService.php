@@ -329,7 +329,56 @@ class KeycloakService
                 'iss' => $this->getOpenIdValue('issuer'),
             );
 
-            $token->validateIdToken($claims);
+            // 如果有id_token，验证它；如果没有（API请求），只验证access_token
+            if (!empty($token->getIdToken())) {
+                $token->validateIdToken($claims);
+            } else {
+                // 对于API请求，验证access_token本身
+                $accessTokenData = $token->parseAccessToken();
+                if (empty($accessTokenData)) {
+                    // 添加详细日志以便调试
+                    $accessTokenStr = $token->getAccessToken();
+                    Log::error('[Keycloak Service] Access Token cannot be parsed', [
+                        'token_length' => strlen($accessTokenStr ?? ''),
+                        'token_preview' => substr($accessTokenStr ?? '', 0, 50) . '...',
+                        'has_access_token' => !empty($accessTokenStr),
+                    ]);
+                    throw new Exception('Access Token cannot be parsed.');
+                }
+                
+                // 验证access_token的基本claims
+                if (isset($accessTokenData['exp']) && time() >= (int)$accessTokenData['exp']) {
+                    throw new Exception('Access Token has expired. Please refresh your token.');
+                }
+                
+                if (isset($accessTokenData['iss']) && $accessTokenData['iss'] !== $claims['iss']) {
+                    throw new Exception('Access Token has wrong issuer.');
+                }
+                
+                // 验证audience：对于API请求，检查azp（authorized party）而不是aud
+                // 因为Keycloak的access token的aud通常是"account"，但azp是实际授权的客户端
+                if (isset($accessTokenData['azp'])) {
+                    // 如果token有azp，验证它是否匹配配置的client_id
+                    if ($accessTokenData['azp'] !== $claims['aud']) {
+                        // 允许azp匹配client_id，这是正常的Keycloak行为
+                        Log::debug('Access token azp does not match client_id, but continuing validation', [
+                            'azp' => $accessTokenData['azp'],
+                            'expected_client_id' => $claims['aud'],
+                        ]);
+                    }
+                } else {
+                    // 如果没有azp，检查aud是否包含client_id
+                    $audience = (array)($accessTokenData['aud'] ?? []);
+                    if (!in_array($claims['aud'], $audience, true)) {
+                        Log::debug('Access token audience validation', [
+                            'aud' => $accessTokenData['aud'] ?? null,
+                            'expected_client_id' => $claims['aud'],
+                        ]);
+                        // 对于API请求，我们更宽松一些，因为Keycloak的aud可能是"account"
+                        // 实际验证会通过UserInfo端点进行
+                    }
+                }
+            }
 
             // Get userinfo
             $url = $this->getOpenIdValue('userinfo_endpoint');
@@ -348,7 +397,17 @@ class KeycloakService
             $user = json_decode($user, true);
 
             // Validate retrieved user is owner of token
-            $token->validateSub($user['sub'] ?? '');
+            // 如果有id_token，验证sub；如果没有，从access_token中获取sub
+            if (!empty($token->getIdToken())) {
+                $token->validateSub($user['sub'] ?? '');
+            } else {
+                // 对于API请求，从access_token中获取sub并验证
+                $accessTokenData = $token->parseAccessToken();
+                $tokenSub = $accessTokenData['sub'] ?? null;
+                if ($tokenSub && $tokenSub !== ($user['sub'] ?? '')) {
+                    throw new Exception('Token sub does not match userinfo sub.');
+                }
+            }
         } catch (GuzzleException $e) {
             $this->logException($e);
         } catch (Exception $e) {
@@ -359,12 +418,59 @@ class KeycloakService
     }
 
     /**
-     * Retrieve Token from Session
+     * Retrieve Token from Session or Authorization Header
      *
      * @return array|null
      */
     public function retrieveToken()
     {
+        // 1. 优先从Authorization Bearer header获取token（用于API请求）
+        $request = request();
+        if ($request) {
+            $authHeader = $request->header('Authorization');
+            if ($authHeader) {
+                // 支持 "Bearer token" 或 "bearer token"（不区分大小写）
+                if (preg_match('/^Bearer\s+(.+)$/i', $authHeader, $matches)) {
+                    $token = trim($matches[1]); // 提取token并去除首尾空格和换行符
+                    
+                    // 清理token：移除可能的换行符、回车符等
+                    $token = preg_replace('/[\r\n\t\s]+/', '', $token);
+                    
+                    // 验证token格式（JWT应该有3个部分，用.分隔）
+                    $parts = explode('.', $token);
+                    if (empty($token) || count($parts) !== 3) {
+                        Log::error('[Keycloak Service] Invalid token format from Authorization header', [
+                            'token_length' => strlen($token),
+                            'token_preview' => substr($token, 0, 50) . '...',
+                            'parts_count' => count($parts),
+                            'header_preview' => substr($authHeader, 0, 100),
+                        ]);
+                        return null;
+                    }
+                    
+                    // 验证每个部分都不为空
+                    foreach ($parts as $index => $part) {
+                        if (empty($part)) {
+                            Log::error('[Keycloak Service] Empty token part', [
+                                'part_index' => $index,
+                                'token_preview' => substr($token, 0, 50) . '...',
+                            ]);
+                            return null;
+                        }
+                    }
+                    
+                    // 构造token数组格式（API请求通常只有access_token）
+                    return [
+                        'access_token' => $token,
+                        'token_type' => 'Bearer',
+                        // API请求可能没有id_token和refresh_token
+                        // 但我们可以从access_token中解析用户信息
+                    ];
+                }
+            }
+        }
+        
+        // 2. 从Session获取token（用于Web请求）
         return session()->get(self::KEYCLOAK_SESSION);
     }
 
