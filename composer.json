@@ -19,9 +19,9 @@
             "email": "antony@ebrook.com.tw"
         }
     ],
-    "minimum-stability": "dev",
+    "minimum-stability": "stable",
     "require": {
-        "guzzlehttp/guzzle": "^6.5|^7.0"
+        "guzzlehttp/guzzle": "^7.10"
     },
     "autoload": {
         "psr-4": {
