@@ -95,6 +95,13 @@ class KeycloakService
     protected $httpClient;
 
     /**
+     * The Cached Token
+     *
+     * @var array|null
+     */
+    protected $token;
+
+    /**
      * @var array of strings
      */
     protected $scopes = ['openid'];
@@ -365,7 +372,12 @@ class KeycloakService
      */
     public function retrieveToken()
     {
-        return session()->get(self::KEYCLOAK_SESSION);
+        if ($this->token) {
+            return $this->token;
+        }
+
+        $this->token = session()->get(self::KEYCLOAK_SESSION);
+        return $this->token;
     }
 
     /**
@@ -375,6 +387,7 @@ class KeycloakService
      */
     public function saveToken($credentials)
     {
+        $this->token = $credentials;
         session()->put(self::KEYCLOAK_SESSION, $credentials);
         session()->save();
     }

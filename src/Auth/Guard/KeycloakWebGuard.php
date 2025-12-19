@@ -31,10 +31,16 @@ class KeycloakWebGuard implements Guard
      */
     protected $request;
 
-    public function __construct(UserProvider $provider, Request $request)
+    /**
+     * @var string
+     */
+    protected $name;
+
+    public function __construct(UserProvider $provider, Request $request, $name = 'keycloak-web')
     {
         $this->provider = $provider;
         $this->request = $request;
+        $this->name = $name;
     }
 
     /**
@@ -164,7 +170,7 @@ class KeycloakWebGuard implements Guard
         $user = $this->provider->retrieveByCredentials($user);
         $this->setUser($user);
 
-        event(new Authenticated(Auth::getDefaultDriver(), Auth()->user()));
+        event(new Authenticated($this->name, $user));
 
         return true;
     }
@@ -226,7 +232,7 @@ class KeycloakWebGuard implements Guard
      */
     public function logout(): void
     {
-        // KeycloakWeb::forgetToken();
+        KeycloakWeb::forgetToken();
         $this->user = null;
     }
 }

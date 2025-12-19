@@ -7,6 +7,9 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\Session;
+use Illuminate\Support\Str;
 use Ebrook\KeycloakWebGuard\Exceptions\KeycloakCallbackException;
 use Ebrook\KeycloakWebGuard\Facades\KeycloakWeb;
 
@@ -35,7 +38,8 @@ class AuthController extends Controller
         $url = KeycloakWeb::getLogoutUrl();
         KeycloakWeb::forgetToken();
       
-        event(new Logout(Auth::getDefaultDriver(), Auth()->user()));
+        $guard = Config::get('keycloak-web.guard', 'web');
+        event(new Logout($guard, Auth::guard($guard)->user()));
       
         return redirect($url);
     }
@@ -81,9 +85,14 @@ class AuthController extends Controller
         if (! empty($code)) {
             $token = KeycloakWeb::getAccessToken($code);
 
-            if (Auth::validate($token)) {
-                $url = config('keycloak-web.redirect_url', '/admin');
-                return redirect()->intended($url);
+            $guard = Config::get('keycloak-web.guard', 'web');
+            if (Auth::guard($guard)->validate($token)) {
+                // Clear any intended URL from session to prevent redirect to wrong panel
+                Session::forget('url.intended');
+                
+                // Always use the configured redirect URL for this guard
+                $url = config('keycloak-web.redirect_url', '/app');
+                return redirect($url);
             }
         }
 

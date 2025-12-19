@@ -42,7 +42,7 @@ return [
      *
      * @link https://www.keycloak.org/docs/3.2/securing_apps/topics/oidc/oidc-generic.html
      */
-    'cache_openid' => env('KEYCLOAK_CACHE_OPENID', false),
+    'cache_openid' => env('KEYCLOAK_CACHE_OPENID', true),
 
     /**
      * Page to redirect after callback if there's no "intent"
@@ -50,6 +50,13 @@ return [
      * @see Ebrook\KeycloakWebGuard\Controllers\AuthController::callback()
      */
     'redirect_url' => env('KEYCLOAK_REDIRECT_URL', '/admin'),
+
+    /**
+     * The guard to use for authentication
+     *
+     * This should match the guard name in config/auth.php that uses the keycloak-web driver
+     */
+    'guard' => env('KEYCLOAK_GUARD', 'web'),
 
     /**
      * The routes for authenticate

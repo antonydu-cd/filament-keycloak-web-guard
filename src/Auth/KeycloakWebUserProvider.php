@@ -35,6 +35,24 @@ class KeycloakWebUserProvider implements UserProvider
     {
         $class = '\\'.ltrim($this->model, '\\');
 
+        // Get the email from credentials (Keycloak returns user profile with email)
+        $email = $credentials['email'] ?? null;
+
+        // If the model is an Eloquent model and we have an email, try to find the user in database
+        if ($email && is_subclass_of($class, \Illuminate\Database\Eloquent\Model::class)) {
+            $user = $class::where('email', $email)->first();
+            
+            if ($user) {
+                // Return the database user instance with all relationships (roles, permissions, etc.)
+                return $user;
+            }
+            
+            // If user not found in database, return null to deny access
+            // (only existing users with assigned roles can login)
+            return null;
+        }
+
+        // Fallback to original behavior for non-Eloquent models (e.g., KeycloakUser)
         return new $class($credentials);
     }
 
