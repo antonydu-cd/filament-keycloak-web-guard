@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static getAccessToken(string $code)
  * @method static getUserProfile(array $credentials)
  * @method static forgetToken()
+ * @method static retrieveToken()
  */
 class KeycloakWeb extends Facade
 {

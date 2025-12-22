@@ -154,7 +154,7 @@ class KeycloakWebGuard implements Guard
             // 对于API请求（从请求头获取token），不清理session
             // 只清理session中的token（如果有）
             if (session()->has('_keycloak_token')) {
-                KeycloakWeb::forgetToken();
+            KeycloakWeb::forgetToken();
             }
 
             if (Config::get('app.debug', false)) {

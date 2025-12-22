@@ -73,6 +73,16 @@ class FilamentKeycloakAuthenticate extends Authenticate
                     'user_class' => get_class($user),
                     'user_email' => $user->email ?? null,
                 ]);
+
+                // Set tenant context if user has a tenant relationship
+                if (method_exists($user, 'tenant') && $user->tenant) {
+                    \Filament\Facades\Filament::setTenant($user->tenant);
+                    \Illuminate\Support\Facades\Log::debug('FilamentKeycloakAuthenticate: Tenant context set', [
+                        'tenant_id' => $user->tenant->id,
+                        'tenant_name' => $user->tenant->name,
+                    ]);
+                }
+
                 $this->auth->shouldUse($guardName);
                 return;
             }

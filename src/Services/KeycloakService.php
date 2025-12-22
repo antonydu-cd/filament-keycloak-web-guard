@@ -178,7 +178,8 @@ class KeycloakService
         }
 
         $params = [
-            'client_id' => $this->getClientId()
+            'client_id' => $this->getClientId(),
+            'state' => $this->state
         ];
         $token = $this->retrieveToken();
         if (! empty($token['id_token'])) {
@@ -416,6 +417,7 @@ class KeycloakService
 
         return $user;
     }
+
 
     /**
      * Retrieve Token from Session or Authorization Header

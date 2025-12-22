@@ -46,6 +46,9 @@ class AuthController extends Controller
      */
     public function logout()
     {
+        // Save state for logout callback validation
+        KeycloakWeb::saveState();
+
         $url = KeycloakWeb::getLogoutUrl();
         KeycloakWeb::forgetToken();
       
@@ -238,17 +241,135 @@ class AuthController extends Controller
                 return redirect(route('keycloak.login'));
             }
             
+            // Extract parameters from URL if provided (for Magento integration)
+            $urlProjectId = $request->query('project_id');
+            $urlTenantInstanceId = $request->query('tenant_instance_id');
+
+            if ($urlProjectId && !session()->has('pending_project_id')) {
+                session(['pending_project_id' => $urlProjectId]);
+                Log::debug('Keycloak callback: Stored project_id from URL parameter', [
+                    'project_id' => $urlProjectId,
+                    'session_id' => session()->getId(),
+                ]);
+            }
+
+            if ($urlTenantInstanceId && !session()->has('pending_tenant_instance_id')) {
+                session(['pending_tenant_instance_id' => $urlTenantInstanceId]);
+                Log::debug('Keycloak callback: Stored tenant_instance_id from URL parameter', [
+                    'tenant_instance_id' => $urlTenantInstanceId,
+                    'session_id' => session()->getId(),
+                ]);
+            }
+
+            // Check if this is a Magento-initiated authentication
+            $isFromMagento = session('from_magento_auth', false);
+            $magentoCallbackUrl = session('magento_callback_url');
+
             // Try to get tenant for this user
-            $tenant = $this->getOrCreateTenantForUser($userEmail, $userName);
-            
-            if (!$tenant) {
+            $result = $this->getOrCreateTenantForUser($userEmail, $userName);
+
+            if (!$result || !is_array($result)) {
                 Log::error('Keycloak callback: Failed to get or create tenant', [
                     'email' => $userEmail,
+                    'result' => $result,
                 ]);
                 KeycloakWeb::forgetState();
                 return redirect(route('keycloak.login'));
             }
+
+            [$tenant, $isNewTenant] = $result;
+
+            // Ensure current user exists in tenant, create if not exists
+            $currentUser = Auth::guard($guardName)->user();
+            if ($currentUser && $currentUser->email) {
+                // Find the corresponding TenantUser
+                $tenantUser = \App\Models\TenantUser::where('email', $currentUser->email)
+                    ->where('tenant_id', $tenant->id)
+                    ->first();
+
+                if (!$tenantUser) {
+                    // User doesn't exist in this tenant, create new user
+                    $projectId = session('pending_project_id');
+                    Log::info('Creating new tenant user for existing tenant', [
+                        'user_email' => $currentUser->email,
+                        'tenant_id' => $tenant->id,
+                        'project_id' => $projectId,
+                        'is_from_magento' => session('from_magento_auth'),
+                        'session_id' => session()->getId(),
+                    ]);
+
+                    try {
+                        // Create new tenant user
+                        $tenantUser = \App\Models\TenantUser::create([
+                            'tenant_id' => $tenant->id,
+                            'email' => $currentUser->email,
+                            'name' => $currentUser->name ?? $currentUser->email,
+                            'password' => bcrypt(uniqid()), // Random password, user logs in via Keycloak
+                            'project_id' => $projectId,
+                        ]);
+
+                        // Assign default role (you may want to customize this)
+                        // For now, we'll skip role assignment as it might be complex
+                        // $tenantUser->assignRole('member'); // Uncomment if you have roles set up
+
+                        Log::info('New tenant user created successfully', [
+                            'tenant_user_id' => $tenantUser->id,
+                            'user_email' => $tenantUser->email,
+                            'tenant_id' => $tenant->id,
+                            'project_id' => $projectId,
+                        ]);
+
+                    } catch (\Exception $e) {
+                        Log::error('Failed to create tenant user', [
+                            'user_email' => $currentUser->email,
+                            'tenant_id' => $tenant->id,
+                            'error' => $e->getMessage(),
+                        ]);
+                        KeycloakWeb::forgetState();
+                        return redirect(route('keycloak.login'));
+                    }
+                } else {
+                    // User exists, update project_id if needed
+                    if (empty($tenantUser->project_id)) {
+                        $projectId = session('pending_project_id');
+                        Log::info('Checking existing tenant user for project ID', [
+                            'tenant_user_id' => $tenantUser->id,
+                            'user_email' => $tenantUser->email,
+                            'tenant_id' => $tenant->id,
+                            'current_project_id' => $tenantUser->project_id,
+                            'session_project_id' => $projectId,
+                            'session_id' => session()->getId(),
+                        ]);
+                        if ($projectId) {
+                            $tenantUser->update(['project_id' => $projectId]);
+                            Log::info('Project ID set to existing tenant user', [
+                                'tenant_user_id' => $tenantUser->id,
+                                'user_email' => $tenantUser->email,
+                                'tenant_id' => $tenant->id,
+                                'project_id' => $projectId,
+                            ]);
+                        }
+                    }
+                }
+            }
             
+            // Check if this is a Magento-initiated authentication
+            // If so, stay in Laravel backend instead of returning to Magento
+            if ($isFromMagento) {
+                $reason = $isNewTenant ? 'new tenant created' : 'user joined existing tenant';
+                Log::info('Keycloak callback: Magento auth processed, staying in Laravel backend', [
+                    'tenant_id' => $tenant->id,
+                    'user_email' => $userEmail,
+                    'is_new_tenant' => $isNewTenant,
+                    'from_magento' => $isFromMagento,
+                    'reason' => $reason,
+                    'existing_tenant_id' => session('existing_tenant_id'),
+                ]);
+
+                // Clear Magento-related session data since we're not returning
+                session()->forget(['from_magento_auth', 'magento_callback_url', 'existing_tenant_id']);
+            }
+
             // Generate redirect URL to tenant dashboard
             // Use route helper with tenant parameter
             try {
@@ -263,8 +384,8 @@ class AuthController extends Controller
                 $redirectUrl = '/app/tenant/' . $tenant->getRouteKey();
             }
             
-            // Clear panel context from session (no longer needed)
-            session()->forget('keycloak_panel_context');
+            // Clear panel context and Magento-related session data from session (no longer needed)
+            session()->forget(['keycloak_panel_context', 'from_magento_auth', 'magento_callback_url', 'pending_project_id', 'pending_tenant_instance_id']);
             
             // Ensure session is saved and committed before redirect
             // This is critical for the session to persist across redirects
@@ -305,31 +426,49 @@ class AuthController extends Controller
      *
      * @param string $email
      * @param string $name
-     * @return \App\Models\Tenant|null
+     * @return array|null [tenant, is_new_tenant]
      */
     protected function getOrCreateTenantForUser(string $email, string $name)
     {
         try {
+            // Check if there's an existing tenant ID from session (user joining existing tenant)
+            $existingTenantId = session('existing_tenant_id');
+            if ($existingTenantId && class_exists(\App\Models\Tenant::class)) {
+                $existingTenant = \App\Models\Tenant::find($existingTenantId);
+                if ($existingTenant) {
+                    Log::debug('Keycloak callback: Found existing tenant from session', [
+                        'email' => $email,
+                        'tenant_id' => $existingTenantId,
+                    ]);
+                    return [$existingTenant, false]; // false = not new tenant, but new user in existing tenant
+                }
+            }
+
             // Check if tenant_user exists for this email
-            if (class_exists(\App\Models\Tenant\User::class)) {
-                $tenantUser = \App\Models\Tenant\User::where('email', $email)->first();
-                
+            if (class_exists(\App\Models\TenantUser::class)) {
+                $tenantUser = \App\Models\TenantUser::where('email', $email)->first();
+
                 if ($tenantUser && $tenantUser->tenant) {
                     Log::debug('Keycloak callback: Found existing tenant for user', [
                         'email' => $email,
                         'tenant_id' => $tenantUser->tenant_id,
                     ]);
-                    return $tenantUser->tenant;
+                    return [$tenantUser->tenant, false]; // false = not new tenant
                 }
             }
             
             // No tenant found, create a new tenant
+            // 获取tenant_instance_id用于租户查找/创建
+            $tenantInstanceId = session('pending_tenant_instance_id');
+
             Log::debug('Keycloak callback: Creating new tenant for user', [
                 'email' => $email,
                 'name' => $name,
+                'tenant_instance_id' => $tenantInstanceId,
             ]);
-            
-            return $this->createTenantForUser($email, $name);
+
+            $tenant = $this->createTenantForUser($email, $name, $tenantInstanceId);
+            return [$tenant, true]; // true = new tenant created
         } catch (\Exception $e) {
             Log::error('Keycloak callback: Error getting or creating tenant', [
                 'email' => $email,
@@ -347,25 +486,81 @@ class AuthController extends Controller
      * @param string $name
      * @return \App\Models\Tenant|null
      */
-    protected function createTenantForUser(string $email, string $name)
+    protected function createTenantForUser(string $email, string $name, ?string $tenantInstanceId = null)
     {
         if (!class_exists(\App\Models\Tenant::class) || !class_exists(\App\Services\TenantPermissionService::class)) {
             Log::error('Keycloak callback: Required classes not found for tenant creation');
             return null;
         }
         
-        return DB::transaction(function () use ($email, $name) {
-            // Create tenant
-            $tenant = \App\Models\Tenant::create([
-                'name' => $name . ' Tenant',
+        return DB::transaction(function () use ($email, $name, $tenantInstanceId) {
+            // 读取Project ID：优先从URL参数，其次从session
+            $projectId = request('project_id') ?: session('pending_project_id');
+
+            // 如果没有提供tenant_instance_id，从session获取
+            if (!$tenantInstanceId) {
+                $tenantInstanceId = session('pending_tenant_instance_id');
+            }
+
+            Log::info('Processing tenant creation/lookup', [
                 'email' => $email,
-                'status' => 'active',
+                'project_id_from_url' => request('project_id'),
+                'project_id_from_session' => session('pending_project_id'),
+                'final_project_id' => $projectId,
+                'tenant_instance_id_from_param' => $tenantInstanceId,
+                'tenant_instance_id_from_session' => session('pending_tenant_instance_id'),
+                'session_id' => session()->getId(),
             ]);
-            
-            Log::debug('Keycloak callback: Tenant created', [
-                'tenant_id' => $tenant->id,
-                'tenant_name' => $tenant->name,
-            ]);
+
+            // 检查是否已存在具有相同tenant_instance_id的租户
+            $existingTenant = null;
+            if ($tenantInstanceId && class_exists(\App\Models\Tenant::class)) {
+                $existingTenant = \App\Models\Tenant::where('tenant_instance_id', $tenantInstanceId)->first();
+                if ($existingTenant) {
+                    Log::info('Found existing tenant with tenant_instance_id', [
+                        'tenant_instance_id' => $tenantInstanceId,
+                        'existing_tenant_id' => $existingTenant->id,
+                        'existing_tenant_name' => $existingTenant->name,
+                        'email' => $email,
+                    ]);
+                }
+            }
+
+            if ($existingTenant) {
+                // 使用现有租户，只需要创建用户
+                $tenant = $existingTenant;
+                Log::info('Using existing tenant instead of creating new one', [
+                    'tenant_id' => $tenant->id,
+                    'tenant_instance_id' => $tenantInstanceId,
+                    'email' => $email,
+                ]);
+
+                // 清理session
+                session()->forget(['pending_project_id', 'pending_tenant_instance_id']);
+            } else {
+                // 生成唯一的tenant_instance_id（如果没有提供的话）
+                if (!$tenantInstanceId) {
+                    $tenantInstanceId = 'tenant-' . date('ymd') . '-' . substr(md5(uniqid()), 0, 6);
+                }
+
+                // Create tenant with tenant_instance_id
+                $tenant = \App\Models\Tenant::create([
+                    'name' => $name . ' Tenant',
+                    'email' => $email,
+                    'status' => 'active',
+                    'tenant_instance_id' => $tenantInstanceId,
+                ]);
+
+                // 清理session（无论project_id来源，都清理session）
+                session()->forget(['pending_project_id', 'pending_tenant_instance_id']);
+
+                Log::info('Tenant created with tenant instance ID', [
+                    'tenant_id' => $tenant->id,
+                    'tenant_name' => $tenant->name,
+                    'tenant_instance_id' => $tenantInstanceId,
+                    'project_id' => $projectId,
+                ]);
+            }
             
             // Initialize tenant permissions and create admin user
             $permissionService = app(\App\Services\TenantPermissionService::class);
@@ -379,13 +574,21 @@ class AuthController extends Controller
                 'name' => $name,
                 'email' => $email,
                 'password' => $randomPassword, // Not used for Keycloak auth
-            ]);
-            
+            ], $projectId);
+
             Log::debug('Keycloak callback: Tenant admin user created', [
                 'tenant_id' => $tenant->id,
                 'admin_email' => $admin->email,
             ]);
-            
+
+            // Set the current tenant context for Filament
+            \Filament\Facades\Filament::setTenant($tenant);
+
+            Log::info('Filament tenant context set', [
+                'tenant_id' => $tenant->id,
+                'user_id' => $admin->id,
+            ]);
+
             return $tenant;
         });
     }
