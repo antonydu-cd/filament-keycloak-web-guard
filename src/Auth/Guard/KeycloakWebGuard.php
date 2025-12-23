@@ -164,6 +164,32 @@ class KeycloakWebGuard implements Guard
             return false;
         }
 
+        // For tenant guard, ensure tenant context is available before provider call
+        if ($this->provider instanceof \App\Auth\TenantKeycloakUserProvider) {
+            // Check if we need to set tenant context from global state
+            if (!session()->has('current_tenant_id')) {
+                // Try to get tenant info from any available source
+                $pendingTenantInstanceId = session('pending_tenant_instance_id');
+                if ($pendingTenantInstanceId) {
+                    $tenant = \App\Models\Tenant::where('tenant_instance_id', $pendingTenantInstanceId)->first();
+                    if ($tenant) {
+                        session(['current_tenant_id' => $tenant->id]);
+                        session()->save(); // Ensure it's saved immediately
+                        \Illuminate\Support\Facades\Log::debug('KeycloakWebGuard: Set tenant context from pending instance ID', [
+                            'tenant_id' => $tenant->id,
+                            'tenant_instance_id' => $pendingTenantInstanceId,
+                        ]);
+                    }
+                }
+            }
+
+            \Illuminate\Support\Facades\Log::debug('KeycloakWebGuard: Authenticating tenant user', [
+                'session_has_current_tenant_id' => session()->has('current_tenant_id'),
+                'session_current_tenant_id' => session('current_tenant_id'),
+                'user_info_keys' => array_keys($user),
+            ]);
+        }
+
         // Provide User
         $user = $this->provider->retrieveByCredentials($user);
         $this->setUser($user);

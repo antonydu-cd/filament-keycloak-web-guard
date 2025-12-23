@@ -180,19 +180,19 @@ class AuthController extends Controller
         
         // Check request path
         if (str_contains($request->path(), 'app') || str_contains($request->path(), 'tenant')) {
-            $guardName = 'tenant-keycloak';
+            $guardName = 'tenant';
         }
         
         // Check referer header (if callback is from app panel login)
         $referer = $request->header('referer');
         if ($referer && (str_contains($referer, '/app/') || str_contains($referer, '/app/login'))) {
-            $guardName = 'tenant-keycloak';
+            $guardName = 'tenant';
         }
         
         // Check session for panel context (stored during login)
         $panelContext = session()->get('keycloak_panel_context');
         if ($panelContext === 'app') {
-            $guardName = 'tenant-keycloak';
+            $guardName = 'tenant';
         }
         
         Log::debug('Keycloak callback: Guard selection', [
@@ -207,14 +207,66 @@ class AuthController extends Controller
             'has_token' => !empty($token),
         ]);
         
+        // For tenant guard, we need to set tenant context before validation
+        // Try to extract user info from token first to determine tenant
+        if ($guardName === 'tenant') {
+            $tempUserInfo = $this->extractUserInfoFromToken($token);
+            if ($tempUserInfo) {
+                $tempUserEmail = $tempUserInfo['email'] ?? $tempUserInfo['preferred_username'] ?? null;
+                if ($tempUserEmail) {
+                    Log::debug('Keycloak callback: Extracted user info for tenant lookup', [
+                        'email' => $tempUserEmail,
+                        'guard' => $guardName,
+                    ]);
+
+                    // Try to get tenant for this user
+                    $tempResult = $this->getOrCreateTenantForUser($tempUserEmail, $tempUserInfo['name'] ?? $tempUserEmail);
+                    if ($tempResult && is_array($tempResult)) {
+                        [$tempTenant, $tempIsNewTenant] = $tempResult;
+                        session(['current_tenant_id' => $tempTenant->id]);
+
+                        Log::info('Keycloak callback: Pre-set tenant context for tenant guard', [
+                            'tenant_id' => $tempTenant->id,
+                            'tenant_name' => $tempTenant->name,
+                            'session_current_tenant_id' => session('current_tenant_id'), // Verify it's set
+                            'user_email' => $tempUserEmail,
+                        ]);
+                    }
+                }
+            }
+        }
+
+        // Ensure session is committed before validation
+        session()->save();
+
+        // Ensure session is committed before validation
+        session()->save();
+
+        // For tenant guard, ensure tenant context is set before validation
+        if ($guardName === 'tenant' && !session()->has('current_tenant_id')) {
+            // This should have been set earlier, but let's double-check
+            $pendingTenantInstanceId = session('pending_tenant_instance_id');
+            if ($pendingTenantInstanceId) {
+                $tenant = \App\Models\Tenant::where('tenant_instance_id', $pendingTenantInstanceId)->first();
+                if ($tenant) {
+                    session(['current_tenant_id' => $tenant->id]);
+                    session()->save(); // Save immediately
+                    Log::debug('AuthController: Emergency tenant context set', [
+                        'tenant_id' => $tenant->id,
+                        'tenant_instance_id' => $pendingTenantInstanceId,
+                    ]);
+                }
+            }
+        }
+
         // Use the correct guard to validate token
         // This will save token to session and authenticate user
         if (Auth::guard($guardName)->validate($token)) {
             Log::debug('Keycloak callback: Token validation successful, processing tenant');
-            
+
             // Clear state after successful authentication
             KeycloakWeb::forgetState();
-            
+
             // Get authenticated user
             // validate() should have authenticated the user and saved token to session
             $user = Auth::guard($guardName)->user();
@@ -278,6 +330,18 @@ class AuthController extends Controller
             }
 
             [$tenant, $isNewTenant] = $result;
+
+            // Set tenant context for user provider
+            session(['current_tenant_id' => $tenant->id]);
+
+            Log::info('Keycloak callback: Set tenant context for authentication', [
+                'tenant_id' => $tenant->id,
+                'tenant_name' => $tenant->name,
+                'session_id' => session()->getId(),
+                'session_current_tenant_id' => session('current_tenant_id'), // Verify it's set
+                'user_email' => $userEmail,
+                'guard_name' => $guardName,
+            ]);
 
             // Ensure current user exists in tenant, create if not exists
             $currentUser = Auth::guard($guardName)->user();
@@ -419,6 +483,45 @@ class AuthController extends Controller
 
         KeycloakWeb::forgetState();
         return redirect(route('keycloak.login'));
+    }
+
+    /**
+     * Extract user information from access token without full validation
+     * Used to determine tenant context before formal authentication
+     *
+     * @param array $token
+     * @return array|null
+     */
+    protected function extractUserInfoFromToken(array $token): ?array
+    {
+        try {
+            if (empty($token['access_token'])) {
+                return null;
+            }
+
+            // Decode access token payload (second part of JWT)
+            $parts = explode('.', $token['access_token']);
+            if (count($parts) < 2) {
+                return null;
+            }
+
+            $payload = json_decode(base64_decode(str_replace(['-', '_'], ['+', '/'], $parts[1])), true);
+            if (!$payload) {
+                return null;
+            }
+
+            return [
+                'sub' => $payload['sub'] ?? null,
+                'email' => $payload['email'] ?? null,
+                'preferred_username' => $payload['preferred_username'] ?? null,
+                'name' => $payload['name'] ?? null,
+            ];
+        } catch (\Exception $e) {
+            Log::warning('Keycloak callback: Failed to extract user info from token', [
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
     }
     
     /**
@@ -581,10 +684,10 @@ class AuthController extends Controller
                 'admin_email' => $admin->email,
             ]);
 
-            // Set the current tenant context for Filament
-            \Filament\Facades\Filament::setTenant($tenant);
+            // Note: Tenant context will be set by the middleware after successful authentication
+            // Do not set tenant here as user is not yet authenticated
 
-            Log::info('Filament tenant context set', [
+            Log::info('Tenant admin user created, tenant context will be set after authentication', [
                 'tenant_id' => $tenant->id,
                 'user_id' => $admin->id,
             ]);
