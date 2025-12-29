@@ -154,12 +154,16 @@ class KeycloakWebGuard implements Guard
             // 对于API请求（从请求头获取token），不清理session
             // 只清理session中的token（如果有）
             if (session()->has('_keycloak_token')) {
-            KeycloakWeb::forgetToken();
+                KeycloakWeb::forgetToken();
             }
 
-            if (Config::get('app.debug', false)) {
-                throw new KeycloakCallbackException('User cannot be authenticated.');
-            }
+            // 记录认证失败的日志，但不抛出异常
+            // 让Laravel的认证系统自动重定向到登录页面
+            \Illuminate\Support\Facades\Log::info('Keycloak authentication failed, token may be expired or invalid', [
+                'reason' => 'user_profile_empty',
+                'has_credentials' => !empty($credentials),
+                'debug_mode' => \Illuminate\Support\Facades\Config::get('app.debug', false),
+            ]);
 
             return false;
         }
@@ -175,7 +179,7 @@ class KeycloakWebGuard implements Guard
                     if ($tenant) {
                         session(['current_tenant_id' => $tenant->id]);
                         session()->save(); // Ensure it's saved immediately
-                        \Illuminate\Support\Facades\Log::debug('KeycloakWebGuard: Set tenant context from pending instance ID', [
+                        \Illuminate\Support\Facades\Log::info('KeycloakWebGuard: Set tenant context from pending instance ID', [
                             'tenant_id' => $tenant->id,
                             'tenant_instance_id' => $pendingTenantInstanceId,
                         ]);
@@ -184,9 +188,8 @@ class KeycloakWebGuard implements Guard
             }
 
             \Illuminate\Support\Facades\Log::debug('KeycloakWebGuard: Authenticating tenant user', [
-                'session_has_current_tenant_id' => session()->has('current_tenant_id'),
-                'session_current_tenant_id' => session('current_tenant_id'),
-                'user_info_keys' => array_keys($user),
+                'has_tenant_context' => session()->has('current_tenant_id'),
+                'user_email' => $user['email'] ?? 'unknown',
             ]);
         }
 
@@ -258,5 +261,27 @@ class KeycloakWebGuard implements Guard
     {
         // KeycloakWeb::forgetToken();
         $this->user = null;
+    }
+
+    /**
+     * Log the user out of the current device.
+     *
+     * This method is called by Laravel's AuthenticateSession middleware
+     * when it detects that the user's password has changed.
+     *
+     * @return void
+     */
+    public function logoutCurrentDevice(): void
+    {
+        $user = $this->user();
+
+        // Clear Keycloak token from session
+        KeycloakWeb::forgetToken();
+
+        // Clear the in-memory user
+        $this->user = null;
+
+        // For Keycloak, we don't need to clear session data as extensively
+        // as SessionGuard does, since authentication is token-based
     }
 }

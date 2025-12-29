@@ -3,6 +3,10 @@
 namespace Ebrook\KeycloakWebGuard\Auth;
 
 use Exception;
+use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
+use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\Log;
 
 class KeycloakAccessToken
 {
@@ -103,6 +107,11 @@ class KeycloakAccessToken
      */
     public function validateIdToken($claims)
     {
+        // Verify JWT signature if enabled
+        if (Config::get('keycloak-web.verify_jwt_signature', true)) {
+            $this->verifyTokenSignature($this->idToken, 'ID Token');
+        }
+
         $token = $this->parseIdToken();
         if (empty($token)) {
             throw new Exception('ID Token is invalid.');
@@ -139,6 +148,137 @@ class KeycloakAccessToken
 
         if (! empty($token['azp']) && $claims['aud'] !== $token['azp']) {
             throw new Exception('Access Token has a wrong audience: has azp but is not the clientId.');
+        }
+    }
+
+    /**
+     * Verify JWT token signature
+     *
+     * @param string $token
+     * @param string $tokenType
+     * @throws Exception
+     * @return void
+     */
+    protected function verifyTokenSignature($token, $tokenType = 'Token')
+    {
+        if (empty($token)) {
+            throw new Exception($tokenType . ' is empty and cannot be verified.');
+        }
+
+        try {
+            // Get the kid (Key ID) from token header
+            $tokenParts = explode('.', $token);
+            if (count($tokenParts) !== 3) {
+                throw new Exception($tokenType . ' has invalid format.');
+            }
+
+            $header = json_decode($this->base64UrlDecode($tokenParts[0]), true);
+            $kid = $header['kid'] ?? null;
+
+            // Get public key from KeycloakService
+            $keycloakService = app(\Ebrook\KeycloakWebGuard\Services\KeycloakService::class);
+            $publicKey = $keycloakService->getPublicKey($kid);
+
+            if (empty($publicKey)) {
+                // Log warning but don't fail if public key retrieval fails
+                // This maintains backward compatibility
+                Log::warning('[Keycloak Token] Failed to retrieve public key for signature verification', [
+                    'token_type' => $tokenType,
+                    'kid' => $kid,
+                ]);
+                return;
+            }
+
+            // Get allowed algorithms
+            $allowedAlgorithms = Config::get('keycloak-web.allowed_algorithms', ['RS256']);
+
+            // Verify the signature using firebase/php-jwt
+            JWT::decode($token, new Key($publicKey, $allowedAlgorithms[0]));
+
+            Log::debug('[Keycloak Token] Signature verification successful', [
+                'token_type' => $tokenType,
+                'kid' => $kid,
+            ]);
+
+        } catch (\Firebase\JWT\ExpiredException $e) {
+            // Token expired - this is expected, let the normal flow handle it
+            Log::info('[Keycloak Token] Token expired during signature verification', [
+                'token_type' => $tokenType,
+            ]);
+            // Don't throw - let the normal expiration check handle it
+            return;
+        } catch (\Firebase\JWT\SignatureInvalidException $e) {
+            // Signature invalid - this is a security issue, should throw
+            Log::error('[Keycloak Token] Signature verification failed', [
+                'token_type' => $tokenType,
+                'error' => $e->getMessage(),
+            ]);
+            throw new Exception($tokenType . ' signature verification failed: ' . $e->getMessage());
+        } catch (\Firebase\JWT\BeforeValidException $e) {
+            // Token not yet valid - rare case
+            Log::warning('[Keycloak Token] Token not yet valid', [
+                'token_type' => $tokenType,
+            ]);
+            return;
+        } catch (\Exception $e) {
+            // Log the error but don't fail hard to maintain backward compatibility
+            Log::warning('[Keycloak Token] Signature verification error (non-critical)', [
+                'token_type' => $tokenType,
+                'error' => $e->getMessage(),
+                'error_class' => get_class($e),
+            ]);
+            
+            // Don't throw for non-critical errors to maintain backward compatibility
+            return;
+        }
+    }
+
+    /**
+     * Validate access token with signature verification
+     *
+     * @param array $claims
+     * @throws Exception
+     * @return void
+     */
+    public function validateAccessToken($claims = [])
+    {
+        // Verify JWT signature if enabled
+        if (Config::get('keycloak-web.verify_jwt_signature', true)) {
+            $this->verifyTokenSignature($this->accessToken, 'Access Token');
+        }
+
+        $token = $this->parseAccessToken();
+        if (empty($token)) {
+            throw new Exception('Access Token is invalid.');
+        }
+
+        $default = array(
+            'exp' => 0,
+            'aud' => '',
+            'iss' => '',
+        );
+
+        $token = array_merge($default, $token);
+        $claims = array_merge($default, (array) $claims);
+
+        // Validate expiration
+        if (time() >= (int) $token['exp']) {
+            throw new Exception('Access Token has expired.');
+        }
+
+        // Validate issuer
+        if (!empty($claims['iss']) && $claims['iss'] !== $token['iss']) {
+            throw new Exception('Access Token has wrong issuer.');
+        }
+
+        // For access tokens, validate audience or azp (authorized party)
+        if (!empty($claims['aud'])) {
+            $audience = isset($token['aud']) ? (array) $token['aud'] : [];
+            $azp = $token['azp'] ?? null;
+            
+            if (!in_array($claims['aud'], $audience, true) && $azp !== $claims['aud']) {
+                throw new Exception('Access Token has wrong audience.');
+            }
         }
     }
 

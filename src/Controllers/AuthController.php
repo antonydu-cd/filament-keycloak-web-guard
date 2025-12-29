@@ -104,8 +104,13 @@ class AuthController extends Controller
             $error = $request->input('error_description');
             $error = ($error) ?: $request->input('error');
 
+            Log::warning('Keycloak callback: Received error from Keycloak, redirecting to login', [
+                'error' => $error,
+                'request_params' => $request->all(),
+            ]);
+
             KeycloakWeb::forgetState();
-            throw new KeycloakCallbackException($error);
+            return redirect(route('keycloak.login'));
         }
 
         // Check given state to mitigate CSRF attack
@@ -163,13 +168,13 @@ class AuthController extends Controller
             $token = KeycloakWeb::getAccessToken($code);
 
         if (empty($token) || empty($token['access_token'])) {
-            Log::error('Keycloak callback: Failed to get access token', [
+            Log::warning('Keycloak callback: Failed to get access token, redirecting to login', [
                 'code' => $code,
                 'token_response' => $token,
             ]);
-            
+
             KeycloakWeb::forgetState();
-            throw new KeycloakCallbackException('Failed to get access token from Keycloak');
+            return redirect(route('keycloak.login'));
         }
 
         // Determine which guard to use based on:

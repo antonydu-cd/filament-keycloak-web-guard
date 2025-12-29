@@ -109,24 +109,58 @@ class KeycloakService
      */
     public function __construct(ClientInterface $client)
     {
+        // 尝试从 KeycloakConfigService 获取配置（如果可用）
+        $keycloakConfigService = null;
+        try {
+            if (app()->bound(\App\Services\KeycloakConfigService::class)) {
+                $keycloakConfigService = app(\App\Services\KeycloakConfigService::class);
+            }
+        } catch (\Exception $e) {
+            // 静默失败，继续使用 Config::get()
+        }
+
         if (is_null($this->baseUrl)) {
-            $this->baseUrl = trim(Config::get('keycloak-web.base_url'), '/');
+            if ($keycloakConfigService) {
+                $value = $keycloakConfigService->getBaseUrl();
+                $this->baseUrl = !empty($value) ? trim($value, '/') : trim(Config::get('keycloak-web.base_url'), '/');
+            } else {
+                $this->baseUrl = trim(Config::get('keycloak-web.base_url'), '/');
+            }
         }
 
         if (is_null($this->realm)) {
-            $this->realm = Config::get('keycloak-web.realm');
+            if ($keycloakConfigService) {
+                $value = $keycloakConfigService->getRealm();
+                $this->realm = !empty($value) ? $value : Config::get('keycloak-web.realm');
+            } else {
+                $this->realm = Config::get('keycloak-web.realm');
+            }
         }
 
         if (is_null($this->clientId)) {
-            $this->clientId = Config::get('keycloak-web.client_id');
+            if ($keycloakConfigService) {
+                $value = $keycloakConfigService->getClientId();
+                $this->clientId = !empty($value) ? $value : Config::get('keycloak-web.client_id');
+            } else {
+                $this->clientId = Config::get('keycloak-web.client_id');
+            }
         }
 
         if (is_null($this->clientSecret)) {
-            $this->clientSecret = Config::get('keycloak-web.client_secret');
+            if ($keycloakConfigService) {
+                $value = $keycloakConfigService->getClientSecret();
+                $this->clientSecret = !empty($value) ? $value : Config::get('keycloak-web.client_secret');
+            } else {
+                $this->clientSecret = Config::get('keycloak-web.client_secret');
+            }
         }
 
         if (is_null($this->cacheOpenid)) {
-            $this->cacheOpenid = Config::get('keycloak-web.cache_openid', false);
+            if ($keycloakConfigService) {
+                $this->cacheOpenid = $keycloakConfigService->shouldCacheOpenId();
+            } else {
+                $this->cacheOpenid = Config::get('keycloak-web.cache_openid', false);
+            }
         }
 
         if (is_null($this->callbackUrl)) {
@@ -134,7 +168,12 @@ class KeycloakService
         }
 
         if (is_null($this->redirectLogout)) {
-            $this->redirectLogout = Config::get('keycloak-web.redirect_logout');
+            if ($keycloakConfigService) {
+                $value = $keycloakConfigService->getRedirectUrl();
+                $this->redirectLogout = !empty($value) ? $value : Config::get('keycloak-web.redirect_logout');
+            } else {
+                $this->redirectLogout = Config::get('keycloak-web.redirect_logout');
+            }
         }
 
         $this->scopes = array_merge($this->scopes, Config::get('keycloak-web.scopes'));
@@ -152,6 +191,10 @@ class KeycloakService
      */
     public function getLoginUrl()
     {
+        if (empty($this->clientId)) {
+            throw new Exception('[Keycloak Error] Keycloak Client ID is not configured. Please configure it in General Settings.');
+        }
+
         $url = $this->getOpenIdValue('authorization_endpoint');
         $params = [
             'scope' => implode(' ', $this->scopes),
@@ -334,7 +377,9 @@ class KeycloakService
             if (!empty($token->getIdToken())) {
                 $token->validateIdToken($claims);
             } else {
-                // 对于API请求，验证access_token本身
+                // 对于API请求，验证access_token（包括签名验证）
+                $token->validateAccessToken($claims);
+                
                 $accessTokenData = $token->parseAccessToken();
                 if (empty($accessTokenData)) {
                     // 添加详细日志以便调试
@@ -345,15 +390,6 @@ class KeycloakService
                         'has_access_token' => !empty($accessTokenStr),
                     ]);
                     throw new Exception('Access Token cannot be parsed.');
-                }
-                
-                // 验证access_token的基本claims
-                if (isset($accessTokenData['exp']) && time() >= (int)$accessTokenData['exp']) {
-                    throw new Exception('Access Token has expired. Please refresh your token.');
-                }
-                
-                if (isset($accessTokenData['iss']) && $accessTokenData['iss'] !== $claims['iss']) {
-                    throw new Exception('Access Token has wrong issuer.');
                 }
                 
                 // 验证audience：对于API请求，检查azp（authorized party）而不是aud
@@ -659,6 +695,15 @@ class KeycloakService
      */
     protected function getOpenIdConfiguration()
     {
+        // Validate required configuration
+        if (empty($this->baseUrl)) {
+            throw new Exception('[Keycloak Error] Keycloak Base URL is not configured. Please configure it in General Settings.');
+        }
+
+        if (empty($this->realm)) {
+            throw new Exception('[Keycloak Error] Keycloak Realm is not configured. Please configure it in General Settings.');
+        }
+
         $cacheKey = 'keycloak_web_guard_openid-' . $this->realm . '-' . md5($this->baseUrl);
 
         // From cache?
@@ -695,6 +740,202 @@ class KeycloakService
         }
 
         return $configuration;
+    }
+
+    /**
+     * Get JWKS (JSON Web Key Set) from Keycloak
+     *
+     * @return array
+     */
+    public function getJwks()
+    {
+        $cacheKey = 'keycloak_web_guard_jwks-' . $this->realm . '-' . md5($this->baseUrl);
+        $cacheDuration = Config::get('keycloak-web.cache_jwks', 3600);
+
+        // From cache?
+        if ($cacheDuration > 0) {
+            $jwks = Cache::get($cacheKey);
+
+            if (! empty($jwks)) {
+                return $jwks;
+            }
+        }
+
+        // Get JWKS URI from OpenID configuration
+        $jwksUri = $this->getOpenIdValue('jwks_uri');
+        
+        if (empty($jwksUri)) {
+            throw new Exception('[Keycloak Error] JWKS URI not found in OpenID configuration');
+        }
+
+        $jwks = [];
+
+        try {
+            $response = $this->httpClient->request('GET', $jwksUri);
+
+            if ($response->getStatusCode() === 200) {
+                $jwks = $response->getBody()->getContents();
+                $jwks = json_decode($jwks, true);
+            }
+        } catch (GuzzleException $e) {
+            $this->logException($e);
+            throw new Exception('[Keycloak Error] Failed to retrieve JWKS: ' . $e->getMessage());
+        }
+
+        // Save cache
+        if ($cacheDuration > 0 && !empty($jwks)) {
+            Cache::put($cacheKey, $jwks, $cacheDuration);
+        }
+
+        return $jwks;
+    }
+
+    /**
+     * Get public key for JWT verification from JWKS
+     *
+     * @param string|null $kid Key ID from JWT header
+     * @return string|null PEM formatted public key
+     */
+    public function getPublicKey($kid = null)
+    {
+        // First, try to use the configured realm public key
+        $realmPublicKey = Config::get('keycloak-web.realm_public_key');
+        
+        if (!empty($realmPublicKey)) {
+            // Format the public key if needed
+            if (strpos($realmPublicKey, '-----BEGIN') === false) {
+                $realmPublicKey = "-----BEGIN PUBLIC KEY-----\n" . 
+                                chunk_split($realmPublicKey, 64, "\n") . 
+                                "-----END PUBLIC KEY-----\n";
+            }
+            return $realmPublicKey;
+        }
+
+        // Otherwise, get from JWKS endpoint
+        try {
+            $jwks = $this->getJwks();
+            
+            if (empty($jwks['keys'])) {
+                Log::warning('[Keycloak Service] No keys found in JWKS');
+                return null;
+            }
+
+            // Find the key with matching kid, or use the first RS256 key
+            foreach ($jwks['keys'] as $key) {
+                if ($kid && isset($key['kid']) && $key['kid'] === $kid) {
+                    return $this->convertJwkToPem($key);
+                }
+                
+                // Fallback to first RS256 key if no kid specified
+                if (!$kid && isset($key['kty']) && $key['kty'] === 'RSA' && 
+                    isset($key['alg']) && $key['alg'] === 'RS256') {
+                    return $this->convertJwkToPem($key);
+                }
+            }
+
+            Log::warning('[Keycloak Service] No matching key found in JWKS', [
+                'requested_kid' => $kid,
+                'available_keys' => count($jwks['keys'])
+            ]);
+            
+            return null;
+        } catch (Exception $e) {
+            Log::error('[Keycloak Service] Failed to get public key: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Convert JWK to PEM format
+     *
+     * @param array $jwk
+     * @return string|null
+     */
+    protected function convertJwkToPem($jwk)
+    {
+        if (!isset($jwk['n']) || !isset($jwk['e'])) {
+            return null;
+        }
+
+        $n = $this->base64UrlDecode($jwk['n']);
+        $e = $this->base64UrlDecode($jwk['e']);
+
+        // Build the RSA public key structure
+        $modulus = $this->encodeDER('INTEGER', $n);
+        $publicExponent = $this->encodeDER('INTEGER', $e);
+        $sequence = $this->encodeDER('SEQUENCE', $modulus . $publicExponent);
+        
+        // Wrap in SEQUENCE with algorithm identifier
+        $algorithmIdentifier = hex2bin('300d06092a864886f70d0101010500'); // rsaEncryption OID
+        $bitString = $this->encodeDER('BIT STRING', chr(0) . $sequence);
+        $publicKey = $this->encodeDER('SEQUENCE', $algorithmIdentifier . $bitString);
+
+        $pem = "-----BEGIN PUBLIC KEY-----\n";
+        $pem .= chunk_split(base64_encode($publicKey), 64, "\n");
+        $pem .= "-----END PUBLIC KEY-----\n";
+
+        return $pem;
+    }
+
+    /**
+     * Base64 URL decode
+     *
+     * @param string $data
+     * @return string
+     */
+    protected function base64UrlDecode($data)
+    {
+        $remainder = strlen($data) % 4;
+        if ($remainder) {
+            $padlen = 4 - $remainder;
+            $data .= str_repeat('=', $padlen);
+        }
+        return base64_decode(strtr($data, '-_', '+/'));
+    }
+
+    /**
+     * Encode data in DER format
+     *
+     * @param string $type
+     * @param string $value
+     * @return string
+     */
+    protected function encodeDER($type, $value)
+    {
+        $tag = [
+            'INTEGER' => 0x02,
+            'BIT STRING' => 0x03,
+            'SEQUENCE' => 0x30,
+        ];
+
+        if (!isset($tag[$type])) {
+            throw new Exception('Unknown DER type: ' . $type);
+        }
+
+        // For INTEGER, ensure proper padding
+        if ($type === 'INTEGER') {
+            // Add leading zero if high bit is set
+            if (ord($value[0]) > 0x7f) {
+                $value = chr(0) . $value;
+            }
+        }
+
+        $length = strlen($value);
+        
+        // Encode length
+        if ($length < 128) {
+            $encodedLength = chr($length);
+        } else {
+            $lengthBytes = '';
+            $tempLength = $length;
+            while ($tempLength > 0) {
+                $lengthBytes = chr($tempLength & 0xff) . $lengthBytes;
+                $tempLength >>= 8;
+            }
+            $encodedLength = chr(0x80 | strlen($lengthBytes)) . $lengthBytes;
+        }
+
+        return chr($tag[$type]) . $encodedLength . $value;
     }
 
     /**

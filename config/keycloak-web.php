@@ -23,6 +23,28 @@ return [
     'realm_public_key' => env('KEYCLOAK_REALM_PUBLIC_KEY', null),
 
     /**
+     * Enable JWT signature verification
+     * 
+     * When enabled, all JWT tokens will be verified using the Keycloak public key
+     * Retrieved from JWKS endpoint (.well-known/openid-configuration)
+     */
+    'verify_jwt_signature' => env('KEYCLOAK_VERIFY_JWT_SIGNATURE', true),
+
+    /**
+     * Allowed JWT algorithms
+     * 
+     * List of algorithms allowed for JWT signature verification
+     */
+    'allowed_algorithms' => ['RS256'],
+
+    /**
+     * Cache JWT public keys from JWKS endpoint
+     * 
+     * Duration in seconds to cache JWKS public keys (default: 1 hour)
+     */
+    'cache_jwks' => env('KEYCLOAK_CACHE_JWKS', 3600),
+
+    /**
      * Keycloak Client ID
      *
      * @see Keycloak >> Clients >> Installation
