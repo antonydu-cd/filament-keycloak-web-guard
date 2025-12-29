@@ -76,7 +76,6 @@ class AuthController extends Controller
         $state = $request->input('state');
         if (empty($state) || ! KeycloakWeb::validateState($state)) {
             KeycloakWeb::forgetState();
-
             throw new KeycloakCallbackException('Invalid state');
         }
 

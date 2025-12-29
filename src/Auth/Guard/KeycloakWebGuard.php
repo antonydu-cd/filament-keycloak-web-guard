@@ -151,11 +151,13 @@ class KeycloakWebGuard implements Guard
     {
         // Get Credentials
         $credentials = KeycloakWeb::retrieveToken();
+
         if (empty($credentials)) {
             return false;
         }
 
         $user = KeycloakWeb::getUserProfile($credentials);
+
         if (empty($user)) {
             KeycloakWeb::forgetToken();
 
@@ -168,6 +170,7 @@ class KeycloakWebGuard implements Guard
 
         // Provide User
         $user = $this->provider->retrieveByCredentials($user);
+
         $this->setUser($user);
 
         event(new Authenticated($this->name, $user));
